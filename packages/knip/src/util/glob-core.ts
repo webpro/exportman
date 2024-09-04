@@ -23,7 +23,7 @@ type GlobOptions = {
 
 type FastGlobOptionsWithoutCwd = Pick<FastGlobOptions, 'onlyDirectories' | 'ignore' | 'absolute' | 'dot'>;
 
-type Gitignores = { ignores: string[]; unignores: string[] };
+type Gitignores = { ignores: Set<string>; unignores: string[] };
 
 const cachedIgnores = new Map<string, Gitignores>();
 
@@ -75,20 +75,21 @@ const findAncestorGitignoreFiles = (cwd: string): string[] => {
     if (isFile(filePath)) gitignorePaths.push(filePath);
     // biome-ignore lint/suspicious/noAssignInExpressions: deal with it
     dir = dirname((prev = dir));
-    if (prev === dir) break;
+    if (prev === dir || dir === '.') break;
   }
   return gitignorePaths;
 };
 
 /** @internal */
 export const findAndParseGitignores = async (cwd: string) => {
-  const ignores: string[] = ['.git', ...GLOBAL_IGNORE_PATTERNS];
+  const init = ['.git', ...GLOBAL_IGNORE_PATTERNS];
+  const ignores: Set<string> = new Set(init);
   const unignores: string[] = [];
   const gitignoreFiles: string[] = [];
   const pmOptions = { ignore: unignores };
 
   // Warning: earlier matchers don't include later unignores (perf win, but can't unignore from ancestor gitignores)
-  const matchers = ignores.map(ignore => _picomatch(ignore, pmOptions));
+  const matchers = new Set(init.map(pattern => _picomatch(pattern, pmOptions)));
 
   const matcher = (str: string) => {
     for (const isMatch of matchers) {
@@ -104,34 +105,50 @@ export const findAndParseGitignores = async (cwd: string) => {
     const dir = dirname(toPosix(filePath));
     const base = relative(cwd, dir);
     const from = base.startsWith('..') ? `${relative(dir, cwd)}/` : undefined;
-    const dirIgnores = base === '' ? ['.git', ...GLOBAL_IGNORE_PATTERNS] : [];
-    const dirUnignores = [];
+    const dirIgnores = new Set(base === '' ? init : []);
+    const dirUnignores = new Set<string>();
 
     for (const rule of parseGitignoreFile(filePath, from)) {
-      const [p, ext] = rule.patterns;
+      const [pattern, extraPattern] = rule.patterns;
       if (rule.negated) {
         if (base === '' || base.startsWith('..')) {
-          if (!unignores.includes(ext)) dirUnignores.push(...rule.patterns);
+          if (!unignores.includes(extraPattern)) {
+            unignores.push(...rule.patterns);
+            dirUnignores.add(pattern);
+            dirUnignores.add(extraPattern);
+          }
         } else {
-          if (!unignores.includes(ext.startsWith('**/') ? ext : `**/${ext}`)) {
-            dirUnignores.push(join(base, p), join(base, ext));
+          if (!unignores.includes(extraPattern.startsWith('**/') ? extraPattern : `**/${extraPattern}`)) {
+            const unignore = join(base, pattern);
+            const extraUnignore = join(base, extraPattern);
+            unignores.push(unignore, extraUnignore);
+            dirUnignores.add(unignore);
+            dirUnignores.add(extraUnignore);
           }
         }
       } else {
         if (base === '' || base.startsWith('..')) {
-          if (!ignores.includes(ext)) dirIgnores.push(...rule.patterns);
+          if (!ignores.has(extraPattern)) {
+            ignores.add(pattern);
+            ignores.add(extraPattern);
+            dirIgnores.add(pattern);
+            dirIgnores.add(extraPattern);
+          }
         } else {
-          if (!ignores.includes(ext.startsWith('**/') ? ext : `**/${ext}`)) {
-            dirIgnores.push(join(base, p), join(base, ext));
+          if (!ignores.has(extraPattern.startsWith('**/') ? extraPattern : `**/${extraPattern}`)) {
+            const ignore = join(base, pattern);
+            const extraIgnore = join(base, extraPattern);
+            ignores.add(ignore);
+            ignores.add(extraIgnore);
+            dirIgnores.add(ignore);
+            dirIgnores.add(extraIgnore);
           }
         }
       }
     }
 
-    ignores.push(...dirIgnores);
-    unignores.push(...dirUnignores);
-    cachedIgnores.set(dir, { ignores: dirIgnores, unignores: dirUnignores });
-    matchers.push(...dirIgnores.map(ignore => _picomatch(ignore, pmOptions)));
+    cachedIgnores.set(dir, { ignores: dirIgnores, unignores: Array.from(dirUnignores) });
+    for (const pattern of dirIgnores) matchers.add(_picomatch(pattern, pmOptions));
   };
 
   findAncestorGitignoreFiles(cwd).forEach(addFile);
@@ -192,7 +209,7 @@ export async function getGitIgnoredHandler(options: Options): Promise<(path: str
   if (options.gitignore === false) return () => false;
 
   const gitignore = await _parseFindGitignores(options.cwd);
-  const matcher = _picomatch(gitignore.ignores, { ignore: gitignore.unignores });
+  const matcher = _picomatch(Array.from(gitignore.ignores), { ignore: gitignore.unignores });
 
   const isGitIgnored = (filePath: string) => matcher(relative(options.cwd, filePath));
 
