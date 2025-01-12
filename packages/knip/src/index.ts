@@ -88,8 +88,9 @@ export const main = async (unresolvedConfiguration: CommandLineOptions) => {
   const isReportDependencies = report.dependencies || report.unlisted || report.unresolved;
   const isReportValues = report.exports || report.nsExports || report.classMembers;
   const isReportTypes = report.types || report.nsTypes || report.enumMembers;
+  const isReportTypeMembers = report.typeMembers;
   const isReportClassMembers = report.classMembers;
-  const isSkipLibs = !(isIncludeLibs || isReportClassMembers);
+  const isSkipLibs = !(isIncludeLibs || isReportTypeMembers || isReportClassMembers);
   const isShowConfigHints = !workspace && !isProduction && !isHideConfigHints;
 
   const collector = new IssueCollector({ cwd, rules, filters });
@@ -314,6 +315,7 @@ export const main = async (unresolvedConfiguration: CommandLineOptions) => {
           isFixExports: fixer.isEnabled && fixer.isFixUnusedExports,
           isFixTypes: fixer.isEnabled && fixer.isFixUnusedTypes,
           ignoreExportsUsedInFile: chief.config.ignoreExportsUsedInFile,
+          isReportTypeMembers,
           isReportClassMembers,
           tags,
         },
@@ -507,6 +509,48 @@ export const main = async (unresolvedConfiguration: CommandLineOptions) => {
                           }
                         }
                       }
+                    }
+                  }
+                }
+
+                if (
+                  principal &&
+                  isReportTypeMembers &&
+                  (exportedItem.type === 'interface' || exportedItem.type === 'type')
+                ) {
+                  if (!principal.shouldAnalyzeTypeMembers(filePath, exportedItem)) continue;
+
+                  const members = exportedItem.members.filter(
+                    member => !(findMatch(workspace.ignoreMembers, member.identifier) || shouldIgnore(member.jsDocTags))
+                  );
+                  for (const member of principal.findUnusedMembers(filePath, members)) {
+                    const id = `${identifier}.${member.identifier}`;
+                    const { isReferenced } = isIdentifierReferenced(filePath, id, true);
+                    const isIgnored = shouldIgnoreTags(member.jsDocTags);
+
+                    if (!isReferenced) {
+                      if (isIgnored) {
+                        const identifier = `${exportedItem.identifier}.${member.identifier}`;
+                        for (const tagName of exportedItem.jsDocTags) {
+                          if (tags[1].includes(tagName.replace(/^\@/, ''))) {
+                            collector.addTagHint({ type: 'tag', filePath, identifier, tagName });
+                          }
+                        }
+                        continue;
+                      }
+
+                      const isIssueAdded = collector.addIssue({
+                        type: 'typeMembers',
+                        filePath,
+                        workspace: workspace.name,
+                        symbol: member.identifier,
+                        parentSymbol: exportedItem.identifier,
+                        pos: member.pos,
+                        line: member.line,
+                        col: member.col,
+                      });
+
+                      if (isFix && isIssueAdded && member.fix) fixer.addUnusedTypeNode(filePath, [member.fix]);
                     }
                   }
                 }
