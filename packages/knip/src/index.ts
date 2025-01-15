@@ -525,11 +525,13 @@ export const main = async (unresolvedConfiguration: CommandLineOptions) => {
 
                   if (members.length === 0 || !principal.shouldAnalyzeTypeMembers(filePath, exportedItem)) continue;
 
-                  const unused: string[] = [];
-                  const isParentUnused = (id: string) => id.includes('.') && unused.some(p => id.startsWith(`${p}.`));
+                  const unusedParents = new Set<string>();
 
-                  for (const member of principal.findUnusedMembers(filePath, members)) {
-                    if (isParentUnused(member.identifier)) continue;
+                  for (const member of members) {
+                    if (member.identifier.includes('.')) {
+                      const parentId = member.identifier.split('.')[0];
+                      if (unusedParents.has(parentId)) continue;
+                    }
 
                     const id = `${identifier}.${member.identifier}`;
                     const { isReferenced: isMemberReferenced } = isIdentifierReferenced(filePath, id, true);
@@ -538,19 +540,22 @@ export const main = async (unresolvedConfiguration: CommandLineOptions) => {
                     if (!isMemberReferenced && !(!isReferenced && !isUnignoreMembers)) {
                       if (isIgnored) continue;
 
-                      const isIssueAdded = collector.addIssue({
-                        type: 'typeMembers',
-                        filePath,
-                        workspace: workspace.name,
-                        symbol: member.identifier,
-                        parentSymbol: exportedItem.identifier,
-                        pos: member.pos,
-                        line: member.line,
-                        col: member.col,
-                      });
+                      if (principal.findUnusedMember(filePath, member)) {
+                        const isIssueAdded = collector.addIssue({
+                          type: 'typeMembers',
+                          filePath,
+                          workspace: workspace.name,
+                          symbol: member.identifier,
+                          parentSymbol: exportedItem.identifier,
+                          pos: member.pos,
+                          line: member.line,
+                          col: member.col,
+                        });
 
-                      unused.push(member.identifier);
-                      if (isFix && isIssueAdded && member.fix) fixer.addUnusedTypeNode(filePath, [member.fix]);
+                        if (!member.identifier.includes('.')) unusedParents.add(member.identifier);
+
+                        if (isFix && isIssueAdded && member.fix) fixer.addUnusedTypeNode(filePath, [member.fix]);
+                      }
                     } else if (isIgnored) {
                       const identifier = `${exportedItem.identifier}.${member.identifier}`;
                       for (const tagName of exportedItem.jsDocTags) {
